@@ -3,7 +3,7 @@
 #include "esphome/core/component.h"
 
 namespace esphome {
-namespace sdspi_card {
+namespace sdspi {
 
 class SDSPICard : public Component {
  public:
