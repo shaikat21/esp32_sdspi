@@ -1,22 +1,8 @@
-
-import esphome.config_validation as cv
 import esphome.codegen as cg
+import esphome.config_validation as cv
+from esphome.const import CONF_ID
 
-from esphome.const import (
-    CONF_ID,
-    CONF_CS_PIN,
-    CONF_MOSI_PIN,
-    CONF_MISO_PIN,
-    CONF_SCLK_PIN,
-)
-from esphome.components import spi  # maybe not needed but may refer to helpers
-from esphome.core import CORE
-
-DEPENDENCIES = []
-AUTO_LOAD = []
-MULTI_CONF = False
-
-sdspi_ns = cg.esphome_ns.namespace("sdspi_card")
+sdspi_ns = cg.esphome_ns.namespace("sdspi")
 SDSPICard = sdspi_ns.class_("SDSPICard", cg.Component)
 
 CONF_CS = "cs_pin"
@@ -40,5 +26,5 @@ async def to_code(config):
     mosi = await cg.gpio_pin_expression(config[CONF_MOSI])
     miso = await cg.gpio_pin_expression(config[CONF_MISO])
 
-    var = cg.new_Pvariable(config[CONF_ID], cs, sclk, mosi, miso)  # assumes constructor matches
+    var = cg.new_Pvariable(config[CONF_ID], cs, sclk, mosi, miso)
     await cg.register_component(var, config)
