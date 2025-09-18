@@ -1,0 +1,50 @@
+esphome:
+  name: esp32-sdspi
+  platform: ESP32
+  board: esp32dev
+  includes:
+    - sdspi_component.h
+  libraries:
+    - "SD/1.0.0"
+
+# Add this to your existing YAML configuration
+spi:
+  clk_pin: GPIO14
+  mosi_pin: GPIO13
+  miso_pin: GPIO12
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+# SDSPI Component
+sdspi:
+  cs_pin: GPIO15
+  mount_point: "/sdcard"
+  max_files: 10
+
+# Example usage
+sensor:
+  - platform: custom
+    lambda: |-
+      auto sd_sensor = new SDCardSensor(id(sdspi));
+      App.register_component(sd_sensor);
+      return {sd_sensor};
+    sensors:
+      name: "SD Card Free Space"
+      unit_of_measurement: "MB"
+
+logger:
+  baud_rate: 0
+
+api:
+  encryption:
+    key: "your_encryption_key"
+
+ota:
+  password: "your_ota_password"
+
+wifi:
+  ssid: "Your_WiFi_SSID"
+  password: "Your_WiFi_Password"
