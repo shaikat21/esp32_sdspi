@@ -1,208 +1,87 @@
-#include "sdspi_component.h"
-#include <string>
-#include <cstring>
+#include "esphome/core/log.h"
+#include "sdspi_card.h"
+
+#include "driver/spi_common.h"
+#include "driver/spi_master.h"
+#include "driver/periph_ctrl.h"
+#include "driver/sdspi_host.h"
+#include "driver/sdmmc_cmd.h"
+#include "esp_vfs_fat.h"
+
+static const char *TAG = "sdspi_card";
 
 namespace esphome {
-namespace sdspi {
+namespace sdspi_card {
 
-static const char *TAG = "sdspi";
+SDSPICard::SDSPICard(int8_t cs_pin, int8_t sck_pin, int8_t mosi_pin, int8_t miso_pin)
+    : cs_pin_(cs_pin), sck_pin_(sck_pin), mosi_pin_(mosi_pin), miso_pin_(miso_pin) {}
 
-void SDSPIComponent::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up SDSPI component...");
-  
-  if (this->cs_pin_ == nullptr) {
-    ESP_LOGE(TAG, "CS pin not configured!");
-    return;
-  }
-  
-  // Initialize SPI bus if not already done
-  this->spi_setup();
-  
-  if (!initialize_sd_card()) {
-    ESP_LOGE(TAG, "Failed to initialize SD card");
-    return;
-  }
-  
-  mounted_ = true;
-  ESP_LOGI(TAG, "SD card mounted successfully at %s", mount_point_);
-}
+void SDSPICard::setup() {
+  ESP_LOGI(TAG, "Setting up SD SPI Card with CS %d, SCLK %d, MOSI %d, MISO %d",
+           this->cs_pin_, this->sck_pin_, this->mosi_pin_, this->miso_pin_);
 
-bool SDSPIComponent::initialize_sd_card() {
-  ESP_LOGI(TAG, "Initializing SD card...");
-  
-  // SDSPI driver configuration
-  sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-  host.slot = spi_bus_;
-  
-  // SPI bus configuration
+  // SPI bus config
   spi_bus_config_t bus_cfg = {
-      .mosi_io_num = mosi_pin_,
-      .miso_io_num = miso_pin_,
-      .sclk_io_num = clk_pin_,
-      .quadwp_io_num = -1,
-      .quadhd_io_num = -1,
-      .max_transfer_sz = 4000,
-      .flags = 0,
-      .intr_flags = 0};
-  
-  esp_err_t ret = spi_bus_initialize(static_cast<spi_host_device_t>(spi_bus_), &bus_cfg, SPI_DMA_CH_AUTO);
+    .mosi_io_num = this->mosi_pin_,
+    .miso_io_num = this->miso_pin_,
+    .sclk_io_num = this->sck_pin_,
+    .quadwp_io_num = -1,
+    .quadhd_io_num = -1,
+    .max_transfer_sz = 4000
+  };
+  esp_err_t ret = spi_bus_initialize((spi_host_device_t)SDSPI_HOST_DEFAULT().slot, &bus_cfg, SDSPI_DEFAULT_DMA());
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
-    return false;
+    ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(ret));
+    this->mark_failed();
+    return;
   }
-  
-  // SDSPI slot configuration
+
+  // Device config
   sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-  slot_config.gpio_cs = static_cast<gpio_num_t>(cs_pin_->get_pin());
-  slot_config.host_id = static_cast<spi_host_device_t>(spi_bus_);
-  
-  // Mount configuration
-  esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-      .format_if_mount_failed = false,
-      .max_files = max_files_,
-      .allocation_unit_size = 16 * 1024};
-  
-  // Mount filesystem
-  ret = esp_vfs_fat_sdspi_mount(mount_point_, &host, &slot_config, &mount_config, &card_);
-  
+  slot_config.gpio_cs = this->cs_pin_;
+  // host_id normally from SDSPI_HOST_DEFAULT().slot
+  slot_config.host_id = (spi_host_device_t)SDSPI_HOST_DEFAULT().slot;
+
+  sdmmc_card_t *card;
+  const char *mount_point = "/sdcard";
+  esp_vfs_fat_sdspi_mount_config_t mount_config = {
+    .format_if_mount_failed = false,
+    .max_files = 5,
+    .allocation_unit_size = 16 * 1024
+  };
+
+  ret = esp_vfs_fat_sdspi_mount(mount_point, &SDSPI_HOST_DEFAULT(), &slot_config, &mount_config, &card);
   if (ret != ESP_OK) {
-    if (ret == ESP_FAIL) {
-      ESP_LOGE(TAG, "Failed to mount filesystem");
-    } else {
-      ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(ret));
-    }
-    return false;
+    ESP_LOGE(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
+    this->mark_failed();
+    return;
   }
-  
-  // Print card info
-  sdmmc_card_print_info(stdout, card_);
-  
-  return true;
+
+  sdmmc_card_print_info(stdout, card);
+  ESP_LOGI(TAG, "SD card mounted at %s", mount_point);
 }
 
-void SDSPIComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "SDSPI Configuration:");
-  LOG_PIN("  CS Pin: ", cs_pin_);
-  ESP_LOGCONFIG(TAG, "  Mount point: %s", mount_point_);
-  ESP_LOGCONFIG(TAG, "  Max files: %d", max_files_);
-  ESP_LOGCONFIG(TAG, "  Mounted: %s", mounted_ ? "Yes" : "No");
-  
-  if (mounted_) {
-    ESP_LOGCONFIG(TAG, "  Card size: %llu MB", get_card_size() / (1024 * 1024));
-    ESP_LOGCONFIG(TAG, "  Free space: %llu MB", get_free_space() / (1024 * 1024));
-    ESP_LOGCONFIG(TAG, "  Card type: %s", get_card_type());
+void SDSPICard::dump_config() {
+  ESP_LOGCONFIG(TAG, "SDSPICard:");
+  ESP_LOGCONFIG(TAG, "  CS Pin: %d", this->cs_pin_);
+  ESP_LOGCONFIG(TAG, "  SCLK Pin: %d", this->sck_pin_);
+  ESP_LOGCONFIG(TAG, "  MOSI Pin: %d", this->mosi_pin_);
+  ESP_LOGCONFIG(TAG, "  MISO Pin: %d", this->miso_pin_);
+}
+
+void SDSPICard::list_root() {
+  // Example: list files in /sdcard root
+  DIR *dir = opendir("/sdcard");
+  if (!dir) {
+    ESP_LOGE(TAG, "Failed to open /sdcard");
+    return;
   }
-}
-
-// File operations implementation
-bool SDSPIComponent::file_exists(const char *path) {
-  if (!mounted_) return false;
-  
-  FILE *f = fopen(path, "r");
-  if (f) {
-    fclose(f);
-    return true;
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    ESP_LOGI(TAG, "Found: %s", entry->d_name);
   }
-  return false;
+  closedir(dir);
 }
 
-bool SDSPIComponent::create_file(const char *path) {
-  if (!mounted_) return false;
-  
-  FILE *f = fopen(path, "w");
-  if (!f) {
-    ESP_LOGE(TAG, "Failed to create file: %s", path);
-    return false;
-  }
-  fclose(f);
-  return true;
-}
-
-bool SDSPIComponent::write_file(const char *path, const char *data) {
-  if (!mounted_) return false;
-  
-  FILE *f = fopen(path, "w");
-  if (!f) {
-    ESP_LOGE(TAG, "Failed to open file for writing: %s", path);
-    return false;
-  }
-  
-  fprintf(f, "%s", data);
-  fclose(f);
-  return true;
-}
-
-bool SDSPIComponent::read_file(const char *path, char *buffer, size_t buffer_size) {
-  if (!mounted_) return false;
-  
-  FILE *f = fopen(path, "r");
-  if (!f) {
-    ESP_LOGE(TAG, "Failed to open file for reading: %s", path);
-    return false;
-  }
-  
-  size_t bytes_read = fread(buffer, 1, buffer_size - 1, f);
-  buffer[bytes_read] = '\0';
-  fclose(f);
-  
-  return bytes_read > 0;
-}
-
-bool SDSPIComponent::delete_file(const char *path) {
-  if (!mounted_) return false;
-  
-  return unlink(path) == 0;
-}
-
-bool SDSPIComponent::create_directory(const char *path) {
-  if (!mounted_) return false;
-  
-  return mkdir(path, 0755) == 0;
-}
-
-bool SDSPIComponent::directory_exists(const char *path) {
-  if (!mounted_) return false;
-  
-  struct stat st;
-  return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-uint64_t SDSPIComponent::get_card_size() {
-  if (!mounted_ || !card_) return 0;
-  return (uint64_t) card_->csd.capacity * card_->csd.sector_size;
-}
-
-uint64_t SDSPIComponent::get_free_space() {
-  if (!mounted_) return 0;
-  
-  FATFS *fs;
-  DWORD fre_clust;
-  FRESULT res = f_getfree("0:", &fre_clust, &fs);
-  if (res != FR_OK) {
-    ESP_LOGE(TAG, "Failed to get free space: %d", res);
-    return 0;
-  }
-  
-  uint64_t total_sectors = (fs->n_fatent - 2) * fs->csize;
-  uint64_t free_sectors = fre_clust * fs->csize;
-  
-  return free_sectors * 512; // Assuming 512 bytes per sector
-}
-
-const char* SDSPIComponent::get_card_type() {
-  if (!mounted_ || !card_) return "Unknown";
-  
-  switch (card_->type) {
-    case SDMMC_CARD_TYPE_SDSC:
-      return "SDSC";
-    case SDMMC_CARD_TYPE_SDHC:
-      return "SDHC";
-    case SDMMC_CARD_TYPE_SDXC:
-      return "SDXC";
-    default:
-      return "Unknown";
-  }
-}
-
-}  // namespace sdspi
+}  // namespace sdspi_card
 }  // namespace esphome
