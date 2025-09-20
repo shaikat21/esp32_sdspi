@@ -4,7 +4,7 @@ from esphome import pins
 from esphome.components import spi
 from esphome.const import CONF_ID, CONF_CS_PIN
 
-CODEOWNERS = ["@your_username"]
+CODEOWNERS = ["@shaikat21"]
 DEPENDENCIES = ["spi"]
 
 sdspi_ns = cg.esphome_ns.namespace("sdspi")
