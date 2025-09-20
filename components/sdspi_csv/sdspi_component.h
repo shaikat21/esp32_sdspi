@@ -9,7 +9,7 @@
 #include <string>
 
 namespace esphome {
-namespace sdspi {
+namespace sdspi_csv {
 
 class SDSPIComponent : public Component, public spi::SPIDevice {
  public:
