@@ -28,12 +28,12 @@ void SdSpi::setup() {
       .max_files = 5,
       .allocation_unit_size = 16 * 1024};
 
-  // SPI host config
-  sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-  host.max_freq_khz = 40000; // can adjust frequency
+// Host
+  this->host_ = SDSPI_HOST_DEFAULT();
+  this->host_.max_freq_khz = 40000;
 
   // SPI slot config
-  sdspi_slot_config_t slot_config = SDSPI_SLOT_CONFIG_DEFAULT();
+  this->slot_config_ = SDSPI_SLOT_CONFIG_DEFAULT();
   slot_config.gpio_miso = static_cast<gpio_num_t>(this->miso_pin_);
   slot_config.gpio_mosi = static_cast<gpio_num_t>(this->mosi_pin_);
   slot_config.gpio_sck  = static_cast<gpio_num_t>(this->clk_pin_);
