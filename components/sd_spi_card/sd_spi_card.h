@@ -99,7 +99,7 @@ class SdSpi : public Component {
 
 #ifdef USE_ESP_IDF
   sdmmc_card_t *card_;
-  sdspi_host_t host_;
+  sdmmc_host_t host_;
   spi_bus_config_t bus_cfg_;
 #endif
 
