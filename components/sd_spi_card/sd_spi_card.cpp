@@ -33,7 +33,7 @@ void SdSpi::setup() {
   host.max_freq_khz = 40000; // can adjust frequency
 
   // SPI slot config
-  spi_bus_config_t slot_config = SDSPI_SLOT_CONFIG_DEFAULT();
+  sdspi_slot_config_t slot_config = SDSPI_SLOT_CONFIG_DEFAULT();
   slot_config.gpio_miso = static_cast<gpio_num_t>(this->miso_pin_);
   slot_config.gpio_mosi = static_cast<gpio_num_t>(this->mosi_pin_);
   slot_config.gpio_sck  = static_cast<gpio_num_t>(this->clk_pin_);
