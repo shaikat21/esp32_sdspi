@@ -29,18 +29,35 @@ void SdSpi::setup() {
       .allocation_unit_size = 16 * 1024};
 
 // Host
-  this->host_ = SDSPI_HOST_DEFAULT();
-  this->host_.max_freq_khz = 40000;
+this->host_ = SDSPI_HOST_DEFAULT();
+this->host_.slot = SPI3_HOST;   // or HSPI_HOST / VSPI_HOST depending on your board
+this->host_.max_freq_khz = 40000; // tune if needed
 
-  // SPI slot config
-  this->slot_config_ = SDSPI_SLOT_CONFIG_DEFAULT();
-  slot_config.gpio_miso = static_cast<gpio_num_t>(this->miso_pin_);
-  slot_config.gpio_mosi = static_cast<gpio_num_t>(this->mosi_pin_);
-  slot_config.gpio_sck  = static_cast<gpio_num_t>(this->clk_pin_);
-  slot_config.gpio_cs   = static_cast<gpio_num_t>(this->cs_pin_);
-  slot_config.gpio_cd   = GPIO_NUM_NC; // no card detect
-  slot_config.host_id   = host.slot;   // default host
+// Bus config
+this->bus_cfg_ = {
+    .mosi_io_num = static_cast<gpio_num_t>(this->mosi_pin_),
+    .miso_io_num = static_cast<gpio_num_t>(this->miso_pin_),
+    .sclk_io_num = static_cast<gpio_num_t>(this->clk_pin_),
+    .quadwp_io_num = -1,
+    .quadhd_io_num = -1,
+    .max_transfer_sz = 4000,
+};
 
+// Initialize bus
+esp_err_t ret = spi_bus_initialize(this->host_.slot, &this->bus_cfg_, SDSPI_DEFAULT_DMA);
+if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to initialize SPI bus.");
+    this->init_error_ = ErrorCode::ERR_PIN_SETUP;
+    mark_failed();
+    return;
+}
+
+// Device (slot) config
+this->slot_config_ = SDSPI_DEVICE_CONFIG_DEFAULT();
+this->slot_config_.gpio_cs = static_cast<gpio_num_t>(this->cs_pin_);
+this->slot_config_.host_id = this->host_.slot;
+  
+// mount sd card
   auto ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
 
   if (ret != ESP_OK) {
