@@ -36,3 +36,50 @@ on_boot:
     - lambda: |-
         id(my_sd)->dump_config();
         id(my_sd)->list_root();
+
+sensor:
+  - platform: sd_spi_card
+    type: used_space
+    unit_of_measurement: Mb
+    name: "SD card used space"
+    filters:
+      - lambda: return sd_spi_card::convertBytes(x, sd_spi_card::MemoryUnits::MegaByte);
+
+  - platform: sd_spi_card
+    type: total_space
+    unit_of_measurement: Gb
+    name: "SD card total space"
+    filters:
+      - lambda: return sd_spi_card::convertBytes(x, sd_spi_card::MemoryUnits::GigaByte);
+
+  - platform: sd_spi_card
+    type: free_space
+    unit_of_measurement: Gb
+    name: "SD card free space"
+    filters:
+      - lambda: return sd_spi_card::convertBytes(x, sd_spi_card::MemoryUnits::GigaByte);
+
+  - platform: sd_spi_card
+    type: file_size
+    name: "text.txt size"
+    unit_of_measurement: Kb
+    path: "/test.txt"
+    filters:
+      - lambda: return sd_spi_card::convertBytes(x, sd_spi_card::MemoryUnits::KiloByte);
+
+text_sensor:
+  - platform: sd_spi_card
+    sd_card_type:
+      name: "SD card type"
+
+
+interval:
+  - interval: 2s
+    then:
+      - lambda: |-
+          static int counter = 0;
+          auto ts = id(sntp_time).now().strftime("%FT%H-%M-%S");
+          std::string line = std::string(ts) + "," + std::to_string(counter++) + "\n";
+          std::vector<uint8_t> data(line.begin(), line.end());
+          id(sd_spi).append_line("/log.csv", line);
+      - logger.log: "Added CSV row to log.csv"
