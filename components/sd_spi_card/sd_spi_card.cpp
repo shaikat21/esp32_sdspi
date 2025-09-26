@@ -1,142 +1,69 @@
 #include "sd_spi_card.h"
-
-#ifdef USE_ESP_IDF
-#include "math.h"
 #include "esphome/core/log.h"
-#include "esp_vfs.h"
-#include "esp_vfs_fat.h"
-#include "driver/sdspi_host.h"
-#include "driver/spi_common.h"
-#include "driver/gpio.h"
 
 namespace esphome {
 namespace sd_spi_card {
 
-static constexpr size_t FILE_PATH_MAX = ESP_VFS_PATH_MAX + CONFIG_SPIFFS_OBJ_NAME_LEN;
-static const char *TAG = "sd_spi_card";
-static const std::string MOUNT_POINT("/sdcard");
+static const char *const TAG = "sd_spi_card";
 
-std::string build_path(const char *path) { return MOUNT_POINT + path; }
+void SdSpiCard::setup() {
+#ifdef USE_ESP_IDF
+  ESP_LOGI(TAG, "Mounting SD card via SDSPI...");
 
-void SdSpi::setup() {
-  if (this->power_ctrl_pin_ != nullptr)
-    this->power_ctrl_pin_->setup();
+  // Configure host
+  sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+  host.slot = VSPI_HOST;
+  host.max_freq_khz = this->spi_freq_khz_;  // ✅ use YAML option
+
+  // Convert pins
+  int mosi = static_cast<InternalGPIOPin*>(this->mosi_pin_)->get_pin();
+  int miso = static_cast<InternalGPIOPin*>(this->miso_pin_)->get_pin();
+  int clk  = static_cast<InternalGPIOPin*>(this->clk_pin_)->get_pin();
+  int cs   = static_cast<InternalGPIOPin*>(this->cs_pin_)->get_pin();
+
+  // SPI bus config
+  spi_bus_config_t bus_cfg = {
+      .mosi_io_num = mosi,
+      .miso_io_num = miso,
+      .sclk_io_num = clk,
+      .quadwp_io_num = -1,
+      .quadhd_io_num = -1,
+      .max_transfer_sz = 4000,
+  };
+
+  ESP_ERROR_CHECK(spi_bus_initialize((spi_host_device_t) host.slot, &bus_cfg, SDSPI_DEFAULT_DMA));
+
+  // Device config
+  sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+  slot_config.gpio_cs = (gpio_num_t) cs;
+  slot_config.host_id = (spi_host_device_t) host.slot;
 
   // Mount config
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
       .format_if_mount_failed = false,
       .max_files = 5,
-      .allocation_unit_size = 16 * 1024};
+      .allocation_unit_size = 16 * 1024
+  };
 
-// Host
-this->host_ = SDSPI_HOST_DEFAULT();
-this->host_.slot = SPI3_HOST;   // or HSPI_HOST / VSPI_HOST depending on your board
-this->host_.max_freq_khz = 40000; // tune if needed
-
-// Bus config
-this->bus_cfg_ = {
-    .mosi_io_num = static_cast<gpio_num_t>(this->mosi_pin_),
-    .miso_io_num = static_cast<gpio_num_t>(this->miso_pin_),
-    .sclk_io_num = static_cast<gpio_num_t>(this->clk_pin_),
-    .quadwp_io_num = -1,
-    .quadhd_io_num = -1,
-    .max_transfer_sz = 4000,
-};
-
-// Initialize bus
-esp_err_t ret = spi_bus_initialize(this->host_.slot, &this->bus_cfg_, SDSPI_DEFAULT_DMA);
-if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to initialize SPI bus.");
-    this->init_error_ = ErrorCode::ERR_PIN_SETUP;
-    mark_failed();
-    return;
-}
-
-// Device (slot) config
-this->slot_config_ = SDSPI_DEVICE_CONFIG_DEFAULT();
-this->slot_config_.gpio_cs = static_cast<gpio_num_t>(this->cs_pin_);
-this->slot_config_.host_id = this->host_.slot;
-  
-// mount sd card
-  auto ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT.c_str(), &host, &slot_config, &mount_config, &this->card_);
-
+  esp_err_t ret = esp_vfs_fat_sdspi_mount("/sdcard", &host, &slot_config, &mount_config, &this->card_);
   if (ret != ESP_OK) {
-    if (ret == ESP_FAIL) {
-      this->init_error_ = ErrorCode::ERR_MOUNT;
-    } else {
-      this->init_error_ = ErrorCode::ERR_NO_CARD;
-    }
-    mark_failed();
-    return;
+    ESP_LOGE(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
+  } else {
+    ESP_LOGI(TAG, "SD card mounted at /sdcard (freq=%d kHz)", this->spi_freq_khz_);
   }
-
-#ifdef USE_TEXT_SENSOR
-  if (this->sd_card_type_text_sensor_ != nullptr)
-    this->sd_card_type_text_sensor_->publish_state(sd_card_type());
 #endif
-
-  update_sensors();
 }
 
-// File write
-void SdSpi::write_file(const char *path, const uint8_t *buffer, size_t len, const char *mode) {
-  std::string absolut_path = build_path(path);
-  FILE *file = fopen(absolut_path.c_str(), mode);
-  if (file == nullptr) {
-    ESP_LOGE(TAG, "Failed to open file for writing");
-    return;
+void SdSpiCard::dump_config() {
+  ESP_LOGCONFIG(TAG, "SD SPI Card:");
+  ESP_LOGCONFIG(TAG, "  SPI Freq: %d kHz", this->spi_freq_khz_);
+  if (this->card_ == nullptr) {
+    ESP_LOGE(TAG, "Not mounted.");
+  } else {
+    ESP_LOGI(TAG, "Card size: %lluMB",
+             (uint64_t) this->card_->csd.capacity * this->card_->csd.sector_size / (1024 * 1024));
   }
-  size_t ok = fwrite(buffer, 1, len, file);
-  if (ok != len) {
-    ESP_LOGE(TAG, "Failed to write to file");
-  }
-  fclose(file);
-  this->update_sensors();
 }
-
-// File read
-std::vector<uint8_t> SdSpi::read_file(char const *path) {
-  ESP_LOGV(TAG, "Read File: %s", path);
-
-  std::string absolut_path = build_path(path);
-  FILE *file = fopen(absolut_path.c_str(), "rb");
-  if (!file) {
-    ESP_LOGE(TAG, "Failed to open file for reading");
-    return {};
-  }
-
-  std::vector<uint8_t> res;
-  size_t fileSize = this->file_size(path);
-  res.resize(fileSize);
-  size_t len = fread(res.data(), 1, fileSize, file);
-  fclose(file);
-
-  if (len != fileSize) {
-    ESP_LOGE(TAG, "Failed to read file: %s", strerror(errno));
-    return {};
-  }
-
-  return res;
-}
-
-// Card type
-std::string SdSpi::sd_card_type() const {
-  if (this->card_ == nullptr) return "UNKNOWN";
-
-  switch (this->card_->csd->mmc_ver) {
-    case MMC_VERSION_UNKNOWN: return "UNKNOWN";
-    case MMC_VERSION_4: return "MMC v4";
-    default: break;
-  }
-
-  return (this->card_->ocr & (1 << 30)) ? "SDHC/SDXC" : "SDSC";
-}
-
-// Other functions (create_directory, remove_directory, delete_file, list_directory_file_info_rec, etc.)
-// remain the same as your original SDMMC code
-// just replace SdMmc -> SdSpi
 
 }  // namespace sd_spi_card
 }  // namespace esphome
-
-#endif  // USE_ESP_IDF
