@@ -6,6 +6,10 @@ from esphome.const import CONF_ID
 sd_spi_card_ns = cg.esphome_ns.namespace("sd_spi_card")
 SdSpiCard = sd_spi_card_ns.class_("SdSpiCard", cg.Component)
 
+CONF_SD_SPI_CARD_ID = "sd_spi_card_id"
+CONF_PATH = "path"
+
+
 CONF_SPI_FREQ = "spi_freq"
 
 CONFIG_SCHEMA = cv.Schema({
