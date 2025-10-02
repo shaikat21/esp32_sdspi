@@ -3,6 +3,8 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/defines.h"
+#include <vector>
+#include <string>
 
 #ifdef USE_ESP_IDF
 #include "driver/sdspi_host.h"
@@ -59,10 +61,24 @@ class SdSpiCard : public Component {
   void set_spi_freq(int freq) { spi_freq_khz_ = freq; }
  
   size_t file_size(const char *path);
+  
+  // --- CSV Helpers (vector based) ---
+  bool csv_append_row(const char *path, const std::vector<std::string> &cells);
+  int  csv_row_count(const char *path);
+  bool csv_delete_rows(const char *path, int row_start, int row_end);
+  bool csv_keep_last_n(const char *path, int max_rows);
+  std::vector<std::string> csv_read_column_range(const char *path, int col_index, int row_start, int row_end);
+  
 
 #ifdef USE_SENSOR
   void add_file_size_sensor(sensor::Sensor *s, const char *path);
 #endif
+
+  void try_remount();
+  void mount_card();
+  void append_file(const char *path, const char *line);
+  void write_file(const char *path, const char *line);
+  bool delete_file(const char *path);
 
  protected:
   sdmmc_card_t *card_{nullptr};
