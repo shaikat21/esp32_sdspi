@@ -1,11 +1,17 @@
 esphome:
-  name: sdspi_test
-  platform: ESP32
+  name: esp32-mini-sdcard-spi
+  friendly_name: esp32_mini_sdcard_spi
+
+
+esp32:
   board: esp32dev
+  framework:
+    type: esp-idf
+
 
 external_components:
-  - source: local
-    path: components
+  - source: github://shaikat21/esp32_sdspi
+    components: [ sd_spi_card ]
 
 logger:
 
