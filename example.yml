@@ -58,17 +58,61 @@ sensor:
   - platform: sd_spi_card
     type: file_size
     name: "text.txt size"
-    path: "/test.txt"
+    path: "/timelog.txt"
 
-
+  - platform: sd_spi_card
+    type: file_size
+    name: "Timelog csv size"
+    path: "/timelog.csv"
 
 interval:
-  - interval: 2s
-    then:
+  - interval: 10s
+    then:   #write to text file 
       - lambda: |-
-          static int counter = 0;
-          auto ts = id(sntp_time).now().strftime("%FT%H-%M-%S");
-          std::string line = std::string(ts) + "," + std::to_string(counter++) + "\n";
-          std::vector<uint8_t> data(line.begin(), line.end());
-          id(sd_spi).append_line("/log.csv", line);
-      - logger.log: "Added CSV row to log.csv"
+          auto t = id(sntp_time).now();
+          if (t.is_valid()) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+                     t.year, t.month, t.day_of_month,
+                     t.hour, t.minute, t.second);
+            id(sd_1).append_file("/timelog.txt", buf);
+          }
+            
+  - interval: 12s
+    then:   #write to csv col 1 to 3
+      - lambda: |-
+          auto t = id(sntp_time).now();
+          if (t.is_valid()) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+                     t.year, t.month, t.day_of_month,
+                     t.hour, t.minute, t.second);
+            id(sd_1).csv_append_row("/timelog.csv",
+                                    {buf, "Hello", "3"});
+            }
+
+  - interval: 15s
+    then:  # Count row
+      - lambda: |-
+          int rows = id(sd_1).csv_row_count("/timelog.csv");
+            ESP_LOGI("csv", "Total rows: %d", rows);
+          
+
+  - interval: 17s
+    then:  # Read col 1 from row 0 - 4
+      - lambda: |-
+          auto vals = id(sd_1).csv_read_column_range("/timelog.csv", 0, 0, 10); 
+          for (auto &v : vals) {
+            ESP_LOGI("csv", "Val: %s", v.c_str());
+          }
+
+  - interval: 20s
+    then:  # Delete row 110 - 150
+      - lambda: |-
+          id(sd_1).csv_delete_rows("/timelog.csv", 110, 150);
+          
+
+  - interval: 30s
+    then:  # keep last 100 row
+      - lambda: |-
+          id(sd_1).csv_keep_last_n("/timelog.csv", 100);
