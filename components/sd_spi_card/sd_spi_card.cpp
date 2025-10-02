@@ -19,7 +19,7 @@ void SdSpiCard::setup() {
   // Configure host
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
   host.slot = VSPI_HOST;
-  host.max_freq_khz = this->spi_freq_khz_;  // ✅ use YAML option
+  host.max_freq_khz = this->spi_freq_khz_;  
 
   // Convert pins
   int mosi = static_cast<InternalGPIOPin*>(this->mosi_pin_)->get_pin();
