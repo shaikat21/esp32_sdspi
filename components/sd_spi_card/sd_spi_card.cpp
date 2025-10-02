@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 #include "ff.h"   // FatFs
 
+
 namespace esphome {
 namespace sd_spi_card {
 
@@ -71,7 +72,8 @@ void SdSpiCard::dump_config() {
 }
 
 size_t SdSpiCard::file_size(const char *path) {
-  FILE *f = fopen(path, "rb");
+  std::string full_path = std::string(MOUNT_POINT) + path;
+  FILE *f = fopen(full_path.c_str(), "rb");
   if (!f) {
     ESP_LOGE(TAG, "Failed to open file %s", path);
     return 0;
@@ -84,7 +86,6 @@ size_t SdSpiCard::file_size(const char *path) {
 
 #ifdef USE_SENSOR
 void SdSpiCard::add_file_size_sensor(sensor::Sensor *s, const char *path) {
-  // Store a copy of the path in std::string so it remains valid
   file_size_sensors_.push_back(FileSizeSensor(s, std::string(path)));
 }
 #endif
@@ -92,8 +93,19 @@ void SdSpiCard::add_file_size_sensor(sensor::Sensor *s, const char *path) {
 void SdSpiCard::update_sensors() {
  #ifdef USE_SENSOR
  
+     // Case 1: No card mounted
   if (this->card_ == nullptr)
+ {
+    if (this->total_space_sensor_ != nullptr) this->total_space_sensor_->publish_state(NAN);
+    if (this->used_space_sensor_  != nullptr) this->used_space_sensor_->publish_state(NAN);
+    if (this->free_space_sensor_  != nullptr) this->free_space_sensor_->publish_state(NAN);
+    
+    for (auto &fs : file_size_sensors_) {
+      if (fs.sensor != nullptr) fs.sensor->publish_state(NAN);
+    }
     return;
+  }
+
 
   FATFS *fs;
   DWORD fre_clust, fre_sect, tot_sect;
@@ -107,26 +119,274 @@ void SdSpiCard::update_sensors() {
     total_bytes = static_cast<uint64_t>(tot_sect) * FF_SS_SDCARD;
     free_bytes  = static_cast<uint64_t>(fre_sect) * FF_SS_SDCARD;
     used_bytes  = total_bytes - free_bytes;
-  } else {
-    ESP_LOGE(TAG, "f_getfree failed: %d", res);
+    
+    if (this->total_space_sensor_ != nullptr)
+       this->total_space_sensor_->publish_state(total_bytes);
+
+    if (this->used_space_sensor_ != nullptr)
+       this->used_space_sensor_->publish_state(used_bytes);
+
+    if (this->free_space_sensor_ != nullptr)
+       this->free_space_sensor_->publish_state(free_bytes);
+
+    for (auto &fs : file_size_sensors_) {
+       if (fs.sensor != nullptr) {
+       fs.sensor->publish_state(this->file_size(fs.path.c_str()));
+  }
+}
+    
+  } else if (res != FR_OK) {
+        ESP_LOGE(TAG, "SD card not accessible, f_getfree() failed (%d)", res);
+        if (this->card_ != nullptr) {
+          esp_vfs_fat_sdcard_unmount(MOUNT_POINT, this->card_);
+          this->card_ = nullptr;
+    }
+
+        // Invalidate sensor values
+        if (this->total_space_sensor_ != nullptr)
+           this->total_space_sensor_->publish_state(NAN);
+           
+        if (this->used_space_sensor_  != nullptr) 
+           this->used_space_sensor_->publish_state(NAN);
+           
+        if (this->free_space_sensor_  != nullptr) 
+           this->free_space_sensor_->publish_state(NAN);
+           
+       for (auto &fs : file_size_sensors_) {
+        if (fs.sensor != nullptr) fs.sensor->publish_state(NAN);
+    }
+           
   }   
 
-  if (this->total_space_sensor_ != nullptr)
-    this->total_space_sensor_->publish_state(total_bytes);
+#endif
+}
 
-  if (this->used_space_sensor_ != nullptr)
-    this->used_space_sensor_->publish_state(used_bytes);
+//mount card while running 
+void SdSpiCard::mount_card() {
+  sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+  host.slot = VSPI_HOST;
+  host.max_freq_khz = this->spi_freq_khz_;
 
-  if (this->free_space_sensor_ != nullptr)
-    this->free_space_sensor_->publish_state(free_bytes);
+  int cs = static_cast<InternalGPIOPin*>(this->cs_pin_)->get_pin();
 
-for (auto &fs : file_size_sensors_) {
-  if (fs.sensor != nullptr) {
-    fs.sensor->publish_state(this->file_size(fs.path.c_str()));
+  sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+  slot_config.gpio_cs = (gpio_num_t) cs;
+  slot_config.host_id = (spi_host_device_t) host.slot;
+
+  esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+      .format_if_mount_failed = false,
+      .max_files = 5,
+      .allocation_unit_size = 16 * 1024
+  };
+
+  esp_err_t ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &this->card_);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
+    this->card_ = nullptr;
+  } else {
+    ESP_LOGI(TAG, "SD card mounted at %s (freq=%d kHz)", MOUNT_POINT, this->spi_freq_khz_);
   }
 }
 
+void SdSpiCard::try_remount() {
+#ifdef USE_ESP_IDF
+  if (this->card_ != nullptr) return;
+
+  ESP_LOGI(TAG, "Attempting to remount SD card...");
+  mount_card();  // reuse mount logic
 #endif
+}
+
+// write & appent file upon failed call remount card this->card_ == nullptr
+
+void SdSpiCard::append_file(const char *path, const char *line) {
+  std::string full_path = std::string(MOUNT_POINT) + path;
+  FILE *f = fopen(full_path.c_str(), "a");
+  if (!f) {
+    this->card_ == nullptr;
+    ESP_LOGE(TAG, "Append failed: %s", full_path.c_str());
+    return;
+  }
+  fputs(line, f);
+  fputc('\n', f);
+  fclose(f);
+  ESP_LOGI(TAG, "Appended to %s: %s", full_path.c_str(), line);
+}
+
+void SdSpiCard::write_file(const char *path, const char *line) {
+  std::string full_path = std::string(MOUNT_POINT) + path;
+  FILE *f = fopen(full_path.c_str(), "w");
+  if (!f) {
+    ESP_LOGE(TAG, "Write failed: %s", full_path.c_str());
+    return;
+  }
+  fputs(line, f);
+  fputc('\n', f);
+  fclose(f);
+  ESP_LOGI(TAG, "Wrote new file %s: %s", full_path.c_str(), line);
+}
+
+
+bool SdSpiCard::delete_file(const char *path) {
+  std::string full_path = std::string(MOUNT_POINT) + path;
+  if (remove(full_path.c_str()) == 0) {
+    ESP_LOGI(TAG, "Deleted file: %s", full_path.c_str());
+    return true;
+  } else {
+    ESP_LOGE(TAG, "Delete failed: %s", full_path.c_str());
+    return false;
+  }
+}
+
+// Append a row in csv
+bool SdSpiCard::csv_append_row(const char *path, const std::vector<std::string> &cells) {
+  std::string full_path = std::string(MOUNT_POINT) + path;
+  FILE *f = fopen(full_path.c_str(), "a");
+  if (!f) {
+    ESP_LOGE(TAG, "Row append failed: %s", full_path.c_str());
+    return false;
+  }
+
+  // Build line in memory for log + write
+  std::string line;
+  for (size_t i = 0; i < cells.size(); i++) {
+    line += cells[i];
+    if (i < cells.size() - 1) line += ",";
+  }
+
+  fputs(line.c_str(), f);
+  fputc('\n', f);
+  fclose(f);
+
+  ESP_LOGI(TAG, "Row appended to %s: %s", full_path.c_str(), line.c_str());
+  return true;
+}
+
+// Count total rows
+int SdSpiCard::csv_row_count(const char *path) {
+  std::string full_path = std::string(MOUNT_POINT) + path;
+  FILE *f = fopen(full_path.c_str(), "r");
+  if (!f) {
+    ESP_LOGE(TAG, "Row count failed, file not found: %s", full_path.c_str());
+    return -1;
+  }
+  int count = 0;
+  char buf[256];
+  while (fgets(buf, sizeof(buf), f)) count++;
+  fclose(f);
+  ESP_LOGI(TAG, "Row count for %s: %d", full_path.c_str(), count);
+  return count;
+}
+
+// Delete range of rows [row_start, row_end]
+bool SdSpiCard::csv_delete_rows(const char *path, int row_start, int row_end) {
+  std::string full_path = std::string(MOUNT_POINT) + path;
+  FILE *fin = fopen(full_path.c_str(), "r");
+  if (!fin) {
+    ESP_LOGE(TAG, "Delete rows failed, file not found: %s", full_path.c_str());
+    return false;
+  }
+  std::string tmp_path = full_path + ".tmp";
+  FILE *fout = fopen(tmp_path.c_str(), "w");
+  if (!fout) {
+    fclose(fin);
+    ESP_LOGE(TAG, "Delete rows failed, cannot open temp file: %s", tmp_path.c_str());
+    return false;
+  }
+
+  char buf[256];
+  int row = 0;
+  while (fgets(buf, sizeof(buf), fin)) {
+    if (row < row_start || row > row_end) {
+      fputs(buf, fout);
+    }
+    row++;
+  }
+  fclose(fin);
+  fclose(fout);
+  remove(full_path.c_str());
+  rename(tmp_path.c_str(), full_path.c_str());
+
+  ESP_LOGI(TAG, "Deleted rows %d–%d from %s", row_start, row_end, full_path.c_str());
+  return true;
+}
+
+// Keep only last N rows
+bool SdSpiCard::csv_keep_last_n(const char *path, int max_rows) {
+  std::string full_path = std::string(MOUNT_POINT) + path;
+  int total = csv_row_count(path);
+  if (total <= max_rows) {
+    ESP_LOGI(TAG, "Keep last %d rows skipped, %s already within limit (%d)", max_rows, full_path.c_str(), total);
+    return true;
+  }
+
+  FILE *fin = fopen(full_path.c_str(), "r");
+  if (!fin) {
+    ESP_LOGE(TAG, "Keep last N failed, file not found: %s", full_path.c_str());
+    return false;
+  }
+  std::string tmp_path = full_path + ".tmp";
+  FILE *fout = fopen(tmp_path.c_str(), "w");
+  if (!fout) {
+    fclose(fin);
+    ESP_LOGE(TAG, "Keep last N failed, cannot open temp file: %s", tmp_path.c_str());
+    return false;
+  }
+
+  char buf[256];
+  int row = 0;
+  int skip = total - max_rows;
+  while (fgets(buf, sizeof(buf), fin)) {
+    if (row >= skip) fputs(buf, fout);
+    row++;
+  }
+  fclose(fin);
+  fclose(fout);
+  remove(full_path.c_str());
+  rename(tmp_path.c_str(), full_path.c_str());
+
+  ESP_LOGI(TAG, "Trimmed %s to last %d rows (was %d)", full_path.c_str(), max_rows, total);
+  return true;
+}
+
+// Pull values from column within row range
+std::vector<std::string> SdSpiCard::csv_read_column_range(
+    const char *path, int col_index, int row_start, int row_end) {
+
+  std::vector<std::string> out;
+  std::string full_path = std::string(MOUNT_POINT) + path;
+  FILE *f = fopen(full_path.c_str(), "r");
+  if (!f) {
+    ESP_LOGE(TAG, "Read column failed, file not found: %s", full_path.c_str());
+    return out;
+  }
+
+  char buf[256];
+  int row = 0;
+
+  while (fgets(buf, sizeof(buf), f)) {
+    if (row >= row_start && row <= row_end) {
+      int col = 0;
+      char *token = strtok(buf, ",");
+      while (token != nullptr) {
+        if (col == col_index) {
+          out.push_back(std::string(token));
+          break;
+        }
+        token = strtok(nullptr, ",");
+        col++;
+      }
+    }
+    if (row > row_end) break;
+    row++;
+  }
+
+  fclose(f);
+
+  ESP_LOGI(TAG, "Read column %d, rows %d–%d from %s, got %d values",
+           col_index, row_start, row_end, full_path.c_str(), (int) out.size());
+
+  return out;
 }
 
 void SdSpiCard::loop() {
@@ -137,6 +397,15 @@ void SdSpiCard::loop() {
   if (now - last_update > 10000) {  // every 10s
     last_update = now;
     update_sensors();
+    
+  }
+  
+    // Retry remount every 5s if card is not mounted
+    static uint32_t last_remount_try = 0;
+  if (this->card_ == nullptr && (now - last_remount_try > 5000)) {
+    last_remount_try = now;
+    ESP_LOGW(TAG, "Card not mounted, attempting remount...");
+    try_remount();
   }
 #endif
 }
