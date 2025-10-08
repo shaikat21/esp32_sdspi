@@ -149,3 +149,12 @@ interval:
     then:  # keep last 10000 row
       - lambda: |-
           id(sd_1).csv_keep_last_n("/timelog.csv", 10000);
+
+  - interval: 1h
+    then:
+      - lambda: |-
+          if (id(sd_1).delete_file("/timelog.csv")) {
+            ESP_LOGI("sd_spi", "timelog.csv deleted successfully");
+          } else {
+            ESP_LOGE("sd_spi", "Failed to delete timelog.csv");
+          }
