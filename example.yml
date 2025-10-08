@@ -24,12 +24,6 @@ wifi:
 #   platformio_options:
 #     framework: idf
 
-sdspi_card:
-  id: my_sd
-  cs_pin: GPIO5
-  sclk_pin: GPIO18
-  mosi_pin: GPIO23
-  miso_pin: GPIO19
 
 # You can then use lambdas etc to call list_root, etc
 # Example using on_boot
@@ -38,7 +32,8 @@ time:
     id: my_time
 
 sd_spi_card:
-  spi_freq: 15000
+  id: sd_1
+  spi_freq: 15000  # Khz, adjust according to your setup. For poor sd card/wiring keep it low(eg: 1000, ~1Khz)
   cs_pin: GPIO5
   clk_pin: GPIO18
   mosi_pin: GPIO23
@@ -71,9 +66,33 @@ sensor:
     name: "Timelog csv size"
     path: "/timelog.csv"
 
+  - platform: uptime
+    type: seconds
+    id: uptime_1
+
+  - platform: wifi_signal
+    id: wifi_sig
+
+binary_sensor:
+  - platform: sd_spi_card
+    name: "SD Card Status"
+    on_press:
+      - logger.log: "SD card is mounted"
+      - output.turn_off: led
+    on_release:
+      - logger.log: "SD card is not mounted"
+      - output.turn_on: led
+
+output:
+  - platform: gpio
+    id: led
+    pin: 
+      inverted: True
+      number: 2
+
 interval:
   - interval: 10s
-    then:   #write to text file 
+    then:   #append to text file 
       - lambda: |-
           auto t = id(sntp_time).now();
           if (t.is_valid()) {
@@ -85,7 +104,7 @@ interval:
           }
             
   - interval: 12s
-    then:   #write to csv col 1 to 3
+    then:   #write to csv col 0 to 2, total 3 col
       - lambda: |-
           auto t = id(sntp_time).now();
           if (t.is_valid()) {
@@ -94,7 +113,7 @@ interval:
                      t.year, t.month, t.day_of_month,
                      t.hour, t.minute, t.second);
             id(sd_1).csv_append_row("/timelog.csv",
-                                    {buf, "Hello", "3"});
+                                    {buf, to_string((int)id(uptime_1).state), to_string((int)id(wifi_sig).state)});
             }
 
   - interval: 15s
@@ -105,20 +124,28 @@ interval:
           
 
   - interval: 17s
-    then:  # Read col 1 from row 0 - 4
+    then:  # Read col 1 from row last 10
       - lambda: |-
-          auto vals = id(sd_1).csv_read_column_range("/timelog.csv", 0, 0, 10); 
-          for (auto &v : vals) {
-            ESP_LOGI("csv", "Val: %s", v.c_str());
-          }
+          int total = id(sd_1).csv_row_count("/timelog.csv");
+          int start = total > 10 ? total - 10 : 0;
+          int end   = total - 1;
+
+          int col_index = 1;  // we want column 1
+          auto vals = id(sd_1).csv_read_column_range("/timelog.csv", col_index, start, end);
+
+          int row = start;
+           for (auto &v : vals) {
+             ESP_LOGI("csv", "Row %d Col %d => %s", row, col_index, v.c_str());
+             row++;
+           }
 
   - interval: 20s
-    then:  # Delete row 110 - 150
+    then:  # Delete row from # - to #
       - lambda: |-
-          id(sd_1).csv_delete_rows("/timelog.csv", 110, 150);
+          id(sd_1).csv_delete_rows("/timelog.csv", -1, -1);
           
 
   - interval: 30s
-    then:  # keep last 100 row
+    then:  # keep last 10000 row
       - lambda: |-
-          id(sd_1).csv_keep_last_n("/timelog.csv", 100);
+          id(sd_1).csv_keep_last_n("/timelog.csv", 10000);
