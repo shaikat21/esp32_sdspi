@@ -58,7 +58,16 @@ void SdSpiCard::setup() {
     ESP_LOGI(TAG, "SD card mounted at /sdcard (freq=%d kHz)", this->spi_freq_khz_);
   }
 #endif
+
+#ifdef USE_BINARY_SENSOR
+  if (this->card_status_binary_sensor_ != nullptr) {
+    bool mounted = (this->card_ != nullptr);
+    this->card_status_binary_sensor_->publish_state(mounted);
+    ESP_LOGI(TAG, "Initial SD card binary state: %s", mounted ? "ON (mounted)" : "OFF (not present)");
+  }
+#endif
 }
+
 
 void SdSpiCard::dump_config() {
   ESP_LOGCONFIG(TAG, "SD SPI Card:");
@@ -162,7 +171,12 @@ void SdSpiCard::update_sensors() {
 }
 
 //mount card while running 
-void SdSpiCard::mount_card() {
+void SdSpiCard::try_remount() {
+#ifdef USE_ESP_IDF
+  if (this->card_ != nullptr) return;
+
+  ESP_LOGI(TAG, "Attempting to re-mount SD card...");
+
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
   host.slot = VSPI_HOST;
   host.max_freq_khz = this->spi_freq_khz_;
@@ -186,24 +200,16 @@ void SdSpiCard::mount_card() {
   } else {
     ESP_LOGI(TAG, "SD card mounted at %s (freq=%d kHz)", MOUNT_POINT, this->spi_freq_khz_);
   }
-}
-
-void SdSpiCard::try_remount() {
-#ifdef USE_ESP_IDF
-  if (this->card_ != nullptr) return;
-
-  ESP_LOGI(TAG, "Attempting to remount SD card...");
-  mount_card();  // reuse mount logic
 #endif
 }
 
-// write & appent file upon failed call remount card this->card_ == nullptr
+
+// write & appent file 
 
 void SdSpiCard::append_file(const char *path, const char *line) {
   std::string full_path = std::string(MOUNT_POINT) + path;
   FILE *f = fopen(full_path.c_str(), "a");
   if (!f) {
-    this->card_ == nullptr;
     ESP_LOGE(TAG, "Append failed: %s", full_path.c_str());
     return;
   }
@@ -213,6 +219,7 @@ void SdSpiCard::append_file(const char *path, const char *line) {
   ESP_LOGI(TAG, "Appended to %s: %s", full_path.c_str(), line);
 }
 
+//write file
 void SdSpiCard::write_file(const char *path, const char *line) {
   std::string full_path = std::string(MOUNT_POINT) + path;
   FILE *f = fopen(full_path.c_str(), "w");
@@ -389,6 +396,61 @@ std::vector<std::string> SdSpiCard::csv_read_column_range(
   return out;
 }
 
+// check sd card presence , if failed try to create , if failed mark the card as failed
+bool SdSpiCard::check_kappa() {
+#ifdef USE_ESP_IDF
+  bool success = false;
+
+  if (this->card_ == nullptr) {
+    ESP_LOGW(TAG, "Kappa check skipped: card not mounted");
+    success = false;
+  } else {
+    // --- Step 1: Try a low-level read to test card health ---
+    uint8_t sector_buf[512];
+    esp_err_t err = sdmmc_read_sectors(this->card_, sector_buf, 0, 1);
+
+    if (err == ESP_OK) {
+      this->last_sd_error_ = ESP_OK;
+      success = true;
+      ESP_LOGD(TAG, "Kappa check OK (sector read succeeded)");
+    } else {
+      this->last_sd_error_ = err;
+      success = false;
+      ESP_LOGE(TAG, "Kappa check failed: %s (0x%x)", esp_err_to_name(err), err);
+    }
+  }
+
+  // --- Step 2: Handle success/failure transitions ---
+  static bool last_success = false;
+  if (success != last_success) {
+#ifdef USE_BINARY_SENSOR
+    if (this->card_status_binary_sensor_ != nullptr)
+      this->card_status_binary_sensor_->publish_state(success);
+#endif
+
+    if (success) {
+      ESP_LOGI(TAG, "Card OK");
+    } else {
+      ESP_LOGE(TAG, "Card failure detected → unmounting");
+      if (this->card_ != nullptr) {
+        esp_vfs_fat_sdcard_unmount(MOUNT_POINT, this->card_);
+        this->card_ = nullptr;
+      }
+    }
+  }
+
+  last_success = success;
+  return success;
+#else
+  return false;
+#endif
+}
+
+
+
+
+
+
 void SdSpiCard::loop() {
 #ifdef USE_SENSOR
   // Update sensors periodically
@@ -400,13 +462,19 @@ void SdSpiCard::loop() {
     
   }
   
-    // Retry remount every 5s if card is not mounted
-    static uint32_t last_remount_try = 0;
-  if (this->card_ == nullptr && (now - last_remount_try > 5000)) {
-    last_remount_try = now;
-    ESP_LOGW(TAG, "Card not mounted, attempting remount...");
+// Retry remount every 5s if card is not mounted
+static uint32_t last_remount_try = 0;
+if (now - last_remount_try > 5000) {
+  last_remount_try = now;
+
+  if (this->card_ == nullptr) {
+    // No card mounted → attempt remount
     try_remount();
+  } else {
+    // Card is mounted → probe it
+    check_kappa();
   }
+}
 #endif
 }
 
