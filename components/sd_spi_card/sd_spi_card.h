@@ -16,6 +16,10 @@
 #include "esphome/components/sensor/sensor.h"
 #endif
 
+#ifdef USE_BINARY_SENSOR
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#endif
+
 #ifdef USE_TEXT_SENSOR
 #include "esphome/components/text_sensor/text_sensor.h"
 #endif
@@ -74,6 +78,12 @@ class SdSpiCard : public Component {
   void add_file_size_sensor(sensor::Sensor *s, const char *path);
 #endif
 
+#ifdef USE_BINARY_SENSOR
+  SUB_BINARY_SENSOR(card_status)
+#endif
+
+
+  bool check_kappa();
   void try_remount();
   void mount_card();
   void append_file(const char *path, const char *line);
@@ -87,6 +97,7 @@ class SdSpiCard : public Component {
   GPIOPin *mosi_pin_{nullptr};
   GPIOPin *miso_pin_{nullptr};
   int spi_freq_khz_{1000};   // default 1 MHz
+  esp_err_t last_sd_error_ = ESP_OK;
   
   
  #ifdef USE_SENSOR
