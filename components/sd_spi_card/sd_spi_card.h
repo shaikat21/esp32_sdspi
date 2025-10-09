@@ -84,6 +84,7 @@ class SdSpiCard : public Component {
 
 
   bool check_kappa();
+  void handle_sd_failure(const char *reason);
   void try_remount();
   void mount_card();
   void append_file(const char *path, const char *line);
