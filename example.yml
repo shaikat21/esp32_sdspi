@@ -38,6 +38,7 @@ sd_spi_card:
   clk_pin: GPIO18
   mosi_pin: GPIO23
   miso_pin: GPIO19
+  update_interval: 10min # For Sensor
 
 
 sensor:
