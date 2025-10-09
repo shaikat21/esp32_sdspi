@@ -76,6 +76,7 @@ sensor:
 binary_sensor:
   - platform: sd_spi_card
     name: "SD Card Status"
+    id: sd_status
     on_press:
       - logger.log: "SD card is mounted"
       - output.turn_off: led
@@ -90,71 +91,34 @@ output:
       inverted: True
       number: 2
 
-interval:
-  - interval: 10s
-    then:   #append to text file 
+  - interval: 20min
+    then:  # Delete row 110 - 150
       - lambda: |-
-          auto t = id(sntp_time).now();
-          if (t.is_valid()) {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
-                     t.year, t.month, t.day_of_month,
-                     t.hour, t.minute, t.second);
-            id(sd_1).append_file("/timelog.txt", buf);
+          if(id(sd_status).state) {
+            id(sd_1).csv_delete_rows("/timelog.csv", -1, -1);
           }
-            
-  - interval: 12s
-    then:   #write to csv col 0 to 2, total 3 col
-      - lambda: |-
-          auto t = id(sntp_time).now();
-          if (t.is_valid()) {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
-                     t.year, t.month, t.day_of_month,
-                     t.hour, t.minute, t.second);
-            id(sd_1).csv_append_row("/timelog.csv",
-                                    {buf, to_string((int)id(uptime_1).state), to_string((int)id(wifi_sig).state)});
-            }
 
-  - interval: 15s
-    then:  # Count row
+  - interval: 30min
+    then:  # keep last 100 row
       - lambda: |-
-          int rows = id(sd_1).csv_row_count("/timelog.csv");
-            ESP_LOGI("csv", "Total rows: %d", rows);
+          if(id(sd_status).state) {
+             id(sd_1).csv_keep_last_n("/timelog.csv", 10000);
+          }
+
+      
+  - interval: 5s
+    then:  # Retry to remount the SD card , if it is removed
+      - lambda: |- 
+          if (!id(sd_status).state) {
+            ESP_LOGI("sd_spi_card", "Card not mounted → trying remount...");
+            id(sd_1).try_remount();
+          }
+
+  - interval: 3s
+    then:  # Check SD card status 
+      - lambda: |-
+          if (id(sd_status).state) {
+            id(sd_1).check_kappa();
+          }
           
 
-  - interval: 17s
-    then:  # Read col 1 from row last 10
-      - lambda: |-
-          int total = id(sd_1).csv_row_count("/timelog.csv");
-          int start = total > 10 ? total - 10 : 0;
-          int end   = total - 1;
-
-          int col_index = 1;  // we want column 1
-          auto vals = id(sd_1).csv_read_column_range("/timelog.csv", col_index, start, end);
-
-          int row = start;
-           for (auto &v : vals) {
-             ESP_LOGI("csv", "Row %d Col %d => %s", row, col_index, v.c_str());
-             row++;
-           }
-
-  - interval: 20s
-    then:  # Delete row from # - to #
-      - lambda: |-
-          id(sd_1).csv_delete_rows("/timelog.csv", -1, -1);
-          
-
-  - interval: 30s
-    then:  # keep last 10000 row
-      - lambda: |-
-          id(sd_1).csv_keep_last_n("/timelog.csv", 10000);
-
-  - interval: 1h
-    then:
-      - lambda: |-
-          if (id(sd_1).delete_file("/timelog.csv")) {
-            ESP_LOGI("sd_spi", "timelog.csv deleted successfully");
-          } else {
-            ESP_LOGE("sd_spi", "Failed to delete timelog.csv");
-          }
