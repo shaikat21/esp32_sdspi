@@ -14,6 +14,11 @@ std::string build_path(const char *path) {return std::string(MOUNT_POINT) + path
 
 void SdSpiCard::setup() {
 #ifdef USE_ESP_IDF
+
+#ifdef USE_BINARY_SENSOR
+  this->card_status_binary_sensor_->publish_state(true);
+#endif
+
   ESP_LOGI(TAG, "Mounting SD card via SDSPI...");
 
   // Configure host
@@ -59,11 +64,12 @@ void SdSpiCard::setup() {
   }
 #endif
 
+// Delay first binary sensor publish until automations are ready
 #ifdef USE_BINARY_SENSOR
   if (this->card_status_binary_sensor_ != nullptr) {
     bool mounted = (this->card_ != nullptr);
-    this->card_status_binary_sensor_->publish_state(mounted);
-    ESP_LOGI(TAG, "Initial SD card binary state: %s", mounted ? "ON (mounted)" : "OFF (not present)");
+      this->card_status_binary_sensor_->publish_state(mounted);
+      ESP_LOGI(TAG, "SD binary state from setup: %s", mounted ? "ON" : "OFF");
   }
 #endif
 }
@@ -170,40 +176,6 @@ void SdSpiCard::update_sensors() {
 #endif
 }
 
-//mount card while running 
-void SdSpiCard::try_remount() {
-#ifdef USE_ESP_IDF
-  if (this->card_ != nullptr) return;
-
-  ESP_LOGI(TAG, "Attempting to re-mount SD card...");
-
-  sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-  host.slot = VSPI_HOST;
-  host.max_freq_khz = this->spi_freq_khz_;
-
-  int cs = static_cast<InternalGPIOPin*>(this->cs_pin_)->get_pin();
-
-  sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-  slot_config.gpio_cs = (gpio_num_t) cs;
-  slot_config.host_id = (spi_host_device_t) host.slot;
-
-  esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-      .format_if_mount_failed = false,
-      .max_files = 5,
-      .allocation_unit_size = 16 * 1024
-  };
-
-  esp_err_t ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &this->card_);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
-    this->card_ = nullptr;
-  } else {
-    ESP_LOGI(TAG, "SD card mounted at %s (freq=%d kHz)", MOUNT_POINT, this->spi_freq_khz_);
-  }
-#endif
-}
-
-
 // write & appent file 
 
 void SdSpiCard::append_file(const char *path, const char *line) {
@@ -211,6 +183,7 @@ void SdSpiCard::append_file(const char *path, const char *line) {
   FILE *f = fopen(full_path.c_str(), "a");
   if (!f) {
     ESP_LOGE(TAG, "Append failed: %s", full_path.c_str());
+    this->handle_sd_failure("File append");
     return;
   }
   fputs(line, f);
@@ -219,12 +192,15 @@ void SdSpiCard::append_file(const char *path, const char *line) {
   ESP_LOGI(TAG, "Appended to %s: %s", full_path.c_str(), line);
 }
 
+
+
 //write file
 void SdSpiCard::write_file(const char *path, const char *line) {
   std::string full_path = std::string(MOUNT_POINT) + path;
   FILE *f = fopen(full_path.c_str(), "w");
   if (!f) {
     ESP_LOGE(TAG, "Write failed: %s", full_path.c_str());
+    this->handle_sd_failure("Write file");
     return;
   }
   fputs(line, f);
@@ -241,6 +217,7 @@ bool SdSpiCard::delete_file(const char *path) {
     return true;
   } else {
     ESP_LOGE(TAG, "Delete failed: %s", full_path.c_str());
+    this->handle_sd_failure("Delete File");
     return false;
   }
 }
@@ -251,6 +228,7 @@ bool SdSpiCard::csv_append_row(const char *path, const std::vector<std::string> 
   FILE *f = fopen(full_path.c_str(), "a");
   if (!f) {
     ESP_LOGE(TAG, "Row append failed: %s", full_path.c_str());
+    this->handle_sd_failure("Row append failed");
     return false;
   }
 
@@ -275,6 +253,7 @@ int SdSpiCard::csv_row_count(const char *path) {
   FILE *f = fopen(full_path.c_str(), "r");
   if (!f) {
     ESP_LOGE(TAG, "Row count failed, file not found: %s", full_path.c_str());
+    this->handle_sd_failure("Row count failed");
     return -1;
   }
   int count = 0;
@@ -291,6 +270,7 @@ bool SdSpiCard::csv_delete_rows(const char *path, int row_start, int row_end) {
   FILE *fin = fopen(full_path.c_str(), "r");
   if (!fin) {
     ESP_LOGE(TAG, "Delete rows failed, file not found: %s", full_path.c_str());
+    this->handle_sd_failure("Delete rows failed");
     return false;
   }
   std::string tmp_path = full_path + ".tmp";
@@ -298,6 +278,7 @@ bool SdSpiCard::csv_delete_rows(const char *path, int row_start, int row_end) {
   if (!fout) {
     fclose(fin);
     ESP_LOGE(TAG, "Delete rows failed, cannot open temp file: %s", tmp_path.c_str());
+    this->handle_sd_failure("Delete rows failed, cannot open temp file");
     return false;
   }
 
@@ -399,64 +380,104 @@ std::vector<std::string> SdSpiCard::csv_read_column_range(
 // check sd card presence , if failed try to create , if failed mark the card as failed
 bool SdSpiCard::check_kappa() {
 #ifdef USE_ESP_IDF
-  bool success = false;
-
   if (this->card_ == nullptr) {
     ESP_LOGW(TAG, "Kappa check skipped: card not mounted");
-    success = false;
-  } else {
-    // --- Step 1: Try a low-level read to test card health ---
-    uint8_t sector_buf[512];
-    esp_err_t err = sdmmc_read_sectors(this->card_, sector_buf, 0, 1);
-
-    if (err == ESP_OK) {
-      this->last_sd_error_ = ESP_OK;
-      success = true;
-      ESP_LOGD(TAG, "Kappa check OK (sector read succeeded)");
-    } else {
-      this->last_sd_error_ = err;
-      success = false;
-      ESP_LOGE(TAG, "Kappa check failed: %s (0x%x)", esp_err_to_name(err), err);
-    }
+    return false;
   }
 
-  // --- Step 2: Handle success/failure transitions ---
-  static bool last_success = false;
-  if (success != last_success) {
-#ifdef USE_BINARY_SENSOR
-    if (this->card_status_binary_sensor_ != nullptr)
-      this->card_status_binary_sensor_->publish_state(success);
-#endif
+  uint8_t sector_buf[512];
+  esp_err_t err = sdmmc_read_sectors(this->card_, sector_buf, 0, 1);
 
-    if (success) {
-      ESP_LOGI(TAG, "Card OK");
-    } else {
-      ESP_LOGE(TAG, "Card failure detected → unmounting");
-      if (this->card_ != nullptr) {
-        esp_vfs_fat_sdcard_unmount(MOUNT_POINT, this->card_);
-        this->card_ = nullptr;
-      }
-    }
+  if (err == ESP_OK) {
+    this->last_sd_error_ = ESP_OK;
+    ESP_LOGD(TAG, "Kappa check OK (sector read succeeded)");
+    return true;
   }
 
-  last_success = success;
-  return success;
+  this->last_sd_error_ = err;
+  ESP_LOGE(TAG, "Kappa check failed: %s (0x%x)", esp_err_to_name(err), err);
+
+  // call the unified handler
+  this->handle_sd_failure("Kappa check");
+  return false;
 #else
   return false;
 #endif
 }
 
 
+void SdSpiCard::handle_sd_failure(const char *reason) {
+  ESP_LOGE(TAG, "SD card failure detected: %s → unmounting...", reason);
+
+  // --- Step 1: Unmount card if still mounted ---
+  if (this->card_ != nullptr) {
+    esp_vfs_fat_sdcard_unmount(MOUNT_POINT, this->card_);
+    this->card_ = nullptr;
+  }
+
+  // --- Step 2: Update binary sensor ---
+#ifdef USE_BINARY_SENSOR
+  if (this->card_status_binary_sensor_ != nullptr) {
+    bool mounted = (this->card_ != nullptr);
+    this->card_status_binary_sensor_->publish_state(mounted);
+    ESP_LOGI(TAG, "SD card binary state from error handler: %s", mounted ? "ON" : "OFF");
+  }
+#endif
 
 
+  // --- Step 3: Attempt remount ---
+  ESP_LOGW(TAG, "Attempting SD card re-mount after failure...");
+  this->try_remount();
+}
 
+//mount card while running 
+void SdSpiCard::try_remount() {
+#ifdef USE_ESP_IDF
+  if (this->card_ != nullptr) return;
+
+  ESP_LOGI(TAG, "Attempting to re-mount SD card...");
+
+  sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+  host.slot = VSPI_HOST;
+  host.max_freq_khz = this->spi_freq_khz_;
+
+  int cs = static_cast<InternalGPIOPin*>(this->cs_pin_)->get_pin();
+
+  sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+  slot_config.gpio_cs = (gpio_num_t) cs;
+  slot_config.host_id = (spi_host_device_t) host.slot;
+
+  esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+      .format_if_mount_failed = false,
+      .max_files = 5,
+      .allocation_unit_size = 16 * 1024
+  };
+
+  esp_err_t ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &this->card_);
+  //bool mounted = (ret == ESP_OK);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
+    this->card_ = nullptr;
+  } else {
+    ESP_LOGI(TAG, "SD card mounted at %s (freq=%d kHz)", MOUNT_POINT, this->spi_freq_khz_);
+  #ifdef USE_BINARY_SENSOR
+  if (this->card_status_binary_sensor_ != nullptr) {
+    bool mounted = (this->card_ != nullptr);
+      this->card_status_binary_sensor_->publish_state(mounted);
+      ESP_LOGI(TAG, "SD card binary state from retry mount: %s", mounted ? "ON" : "OFF");
+  }
+#endif // binary sensor 
+  }
+#endif // use esp-idf
+
+}
 
 void SdSpiCard::loop() {
 #ifdef USE_SENSOR
   // Update sensors periodically
   static uint32_t last_update = 0;
   uint32_t now = millis();
-  if (now - last_update > 10000) {  // every 10s
+  if (now - last_update > 90000) {  // every 10s
     last_update = now;
     update_sensors();
     
@@ -470,12 +491,22 @@ if (now - last_remount_try > 5000) {
   if (this->card_ == nullptr) {
     // No card mounted → attempt remount
     try_remount();
-  } else {
-    // Card is mounted → probe it
+  } 
+  
+}
+
+static uint32_t last_cappa_check = 0;
+if (now - last_cappa_check > 3000) {
+  last_cappa_check = now;
+
+  if (this->card_ != nullptr) {
+    // No card mounted → attempt remount
     check_kappa();
-  }
+  } 
+  
 }
 #endif
+
 }
 
 
