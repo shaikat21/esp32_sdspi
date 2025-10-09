@@ -4,7 +4,8 @@ from esphome import pins
 from esphome.const import CONF_ID
 
 sd_spi_card_ns = cg.esphome_ns.namespace("sd_spi_card")
-SdSpiCard = sd_spi_card_ns.class_("SdSpiCard", cg.Component)
+##SdSpiCard = sd_spi_card_ns.class_("SdSpiCard", cg.Component)
+SdSpiCard = sd_spi_card_ns.class_("SdSpiCard", cg.PollingComponent, cg.Component)
 
 CONF_SD_SPI_CARD_ID = "sd_spi_card_id"
 CONF_PATH = "path"
@@ -19,7 +20,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Required("mosi_pin"): pins.gpio_output_pin_schema,
     cv.Required("miso_pin"): pins.gpio_output_pin_schema,
     cv.Optional(CONF_SPI_FREQ, default=1000): cv.int_range(min=100, max=40000),
-}).extend(cv.COMPONENT_SCHEMA)
+}).extend(cv.polling_component_schema("60s"))
 
 
 async def to_code(config):
