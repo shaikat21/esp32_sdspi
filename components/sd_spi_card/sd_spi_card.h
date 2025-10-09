@@ -46,7 +46,7 @@ struct FileInfo {
   FileInfo(std::string const &, size_t, bool);
 };
 
-class SdSpiCard : public Component {
+class SdSpiCard : public PollingComponent {
  #ifdef USE_SENSOR
   SUB_SENSOR(used_space)
   SUB_SENSOR(total_space)
@@ -54,9 +54,10 @@ class SdSpiCard : public Component {
 #endif
  
  public:
+ 
   void setup() override;
   void dump_config() override;
-  void loop() override;
+  void update() override;
 
   void set_cs_pin(GPIOPin *pin) { cs_pin_ = pin; }
   void set_clk_pin(GPIOPin *pin) { clk_pin_ = pin; }
