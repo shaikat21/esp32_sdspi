@@ -434,6 +434,12 @@ void SdSpiCard::handle_sd_failure(const char *reason) {
 void SdSpiCard::try_remount() {
 #ifdef USE_ESP_IDF
   if (this->card_ != nullptr) return;
+  
+    // Guard: skip if pins not ready yet
+  if (!this->cs_pin_ || !this->clk_pin_ || !this->mosi_pin_ || !this->miso_pin_) {
+    ESP_LOGW("sd_spi_card", "Pins not initialized yet — skipping remount");
+    return;
+  }
 
   ESP_LOGI(TAG, "Attempting to re-mount SD card...");
 
@@ -482,31 +488,7 @@ void SdSpiCard::loop() {
     update_sensors();
     
   }
-  
-// Retry remount every 5s if card is not mounted
-static uint32_t last_remount_try = 0;
-if (now - last_remount_try > 5000) {
-  last_remount_try = now;
-
-  if (this->card_ == nullptr) {
-    // No card mounted → attempt remount
-    try_remount();
-  } 
-  
-}
-
-static uint32_t last_cappa_check = 0;
-if (now - last_cappa_check > 3000) {
-  last_cappa_check = now;
-
-  if (this->card_ != nullptr) {
-    // No card mounted → attempt remount
-    check_kappa();
-  } 
-  
-}
 #endif
-
 }
 
 
