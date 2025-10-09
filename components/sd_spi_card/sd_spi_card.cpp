@@ -478,16 +478,16 @@ void SdSpiCard::try_remount() {
 
 }
 
-void SdSpiCard::loop() {
+void SdSpiCard::update() {
 #ifdef USE_SENSOR
   // Update sensors periodically
-  static uint32_t last_update = 0;
-  uint32_t now = millis();
-  if (now - last_update > 90000) {  // every 10s
-    last_update = now;
+ // static uint32_t last_update = 0;
+ // uint32_t now = millis();
+//  if (now - last_update > 90000) {  // every 10s
+//    last_update = now;
     update_sensors();
     
-  }
+ // }
 #endif
 }
 
