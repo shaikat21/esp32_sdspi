@@ -121,5 +121,63 @@ output:
           if (id(sd_status).state) {
             id(sd_1).check_kappa();
           }
+  - interval: 13s
+    then:  # Replace a cell
+      - lambda: |-
+          id(sd_1).csv_replace_col("/timelog.csv", 427, 2, "test");
+
+  - interval: 17s
+    then:  # Read last_n_row  with or without condition (for col col_cond_index )
+      - output.set_level:
+          id: my_slow_pwm
+          level: "50%"
+      - delay: 2s   
+      - lambda: |-
+           if (id(sd_status).state) {
+             const char *path = "/timelog.csv";
+             int total = id(sd_1).csv_row_count(path);
+             int last_n_row = 200;
+             const char *condition = "1 - 70"; 
+             int col_cond_index = 1;
+           
+             int row_start = total > last_n_row ? total - last_n_row : 0;
+             int row_end   = total - 1;
+           
+             // Returns rows; each row's LAST element is a tag like "@row=193"
+             // auto vals = id(sd_1).csv_read_rows_range(path, row_start, row_end); // without condition
+
+             auto vals = id(sd_1).csv_read_rows_range(path, row_start, row_end, col_cond_index, condition);  // with condition
+
+             for (auto &r : vals) {
+               // Extract absolute row index from the tag
+               int real_row = -1;
+               if (!r.empty()) {
+                 const std::string &tag = r.back();
+                 if (tag.rfind("@row=", 0) == 0) {               // starts with "@row="
+                   real_row = atoi(tag.c_str() + 5);             // skip "@row="
+                 }
+               }
+           
+               // Rebuild CSV line excluding the tag (if present)
+               std::string line;
+               size_t upto = r.size();
+               if (upto > 0 && r.back().rfind("@row=", 0) == 0)  // don't include tag in the printed CSV
+                 upto -= 1;
+            
+               for (size_t i = 0; i < upto; i++) {
+                 line += r[i];
+                 if (i + 1 < upto) line += ",";
+               }
+           
+               ESP_LOGI("csv", "Row %d => %s", real_row, line.c_str());
+             }
+           }
+      - delay: 1s
           
+      - lambda: |-
+          // force publish current SD card status
+          if(id(sd_status).state){
+            id(my_slow_pwm).set_level(0.0f);
+          }
+          else {id(my_slow_pwm).set_level(1.0f);}
 
