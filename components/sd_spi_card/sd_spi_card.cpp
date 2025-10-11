@@ -64,7 +64,7 @@ void SdSpiCard::setup() {
   }
 #endif
 
-// Delay first binary sensor publish until automations are ready
+// update binary sensor
 #ifdef USE_BINARY_SENSOR
   if (this->card_status_binary_sensor_ != nullptr) {
     bool mounted = (this->card_ != nullptr);
@@ -152,24 +152,7 @@ void SdSpiCard::update_sensors() {
     
   } else if (res != FR_OK) {
         ESP_LOGE(TAG, "SD card not accessible, f_getfree() failed (%d)", res);
-        if (this->card_ != nullptr) {
-          esp_vfs_fat_sdcard_unmount(MOUNT_POINT, this->card_);
-          this->card_ = nullptr;
-    }
-
-        // Invalidate sensor values
-        if (this->total_space_sensor_ != nullptr)
-           this->total_space_sensor_->publish_state(NAN);
-           
-        if (this->used_space_sensor_  != nullptr) 
-           this->used_space_sensor_->publish_state(NAN);
-           
-        if (this->free_space_sensor_  != nullptr) 
-           this->free_space_sensor_->publish_state(NAN);
-           
-       for (auto &fs : file_size_sensors_) {
-        if (fs.sensor != nullptr) fs.sensor->publish_state(NAN);
-    }
+        this->handle_sd_failure("Sensor update failed");
            
   }   
 
@@ -264,6 +247,63 @@ int SdSpiCard::csv_row_count(const char *path) {
   return count;
 }
 
+// replace a col of a specific row
+bool SdSpiCard::csv_replace_col(const char *path, int row_index, int col_index, const char *new_value) {
+  std::string full_path = std::string(MOUNT_POINT) + path;
+  FILE *fin = fopen(full_path.c_str(), "r");
+  if (!fin) {
+    ESP_LOGE(TAG, "Replace col failed, file not found: %s", full_path.c_str());
+    return false;
+  }
+
+  std::string tmp_path = full_path + ".tmp";
+  FILE *fout = fopen(tmp_path.c_str(), "w");
+  if (!fout) {
+    fclose(fin);
+    ESP_LOGE(TAG, "Replace col failed, cannot open temp file: %s", tmp_path.c_str());
+    return false;
+  }
+
+  char buf[256];
+  int row = 0;
+
+  while (fgets(buf, sizeof(buf), fin)) {
+    if (row == row_index) {
+      // Replace specific column
+      char *saveptr;
+      char *token = strtok_r(buf, ",", &saveptr);
+      char new_line[256] = {0};
+      int col = 0;
+
+      while (token != nullptr) {
+        if (col > 0) strcat(new_line, ",");
+        if (col == col_index) {
+          strcat(new_line, new_value);
+        } else {
+          strcat(new_line, token);
+        }
+        token = strtok_r(nullptr, ",", &saveptr);
+        col++;
+      }
+      strcat(new_line, "\n");
+      fputs(new_line, fout);
+    } else {
+      fputs(buf, fout);
+    }
+    row++;
+  }
+
+  fclose(fin);
+  fclose(fout);
+  remove(full_path.c_str());
+  rename(tmp_path.c_str(), full_path.c_str());
+
+  ESP_LOGI(TAG, "Replaced row %d col %d in %s with '%s'", row_index, col_index, full_path.c_str(), new_value);
+  return true;
+}
+
+
+
 // Delete range of rows [row_start, row_end]
 bool SdSpiCard::csv_delete_rows(const char *path, int row_start, int row_end) {
   std::string full_path = std::string(MOUNT_POINT) + path;
@@ -337,16 +377,32 @@ bool SdSpiCard::csv_keep_last_n(const char *path, int max_rows) {
   return true;
 }
 
-// Pull values from column within row range
-std::vector<std::string> SdSpiCard::csv_read_column_range(
-    const char *path, int col_index, int row_start, int row_end) {
+// Pull all columns (rows range) with optional condition on any column
+std::vector<std::vector<std::string>> SdSpiCard::csv_read_rows_range(
+    const char *path, int row_start, int row_end, int cond_col_index, const char *condition) {
 
-  std::vector<std::string> out;
+  std::vector<std::vector<std::string>> out;
   std::string full_path = std::string(MOUNT_POINT) + path;
   FILE *f = fopen(full_path.c_str(), "r");
   if (!f) {
-    ESP_LOGE(TAG, "Read column failed, file not found: %s", full_path.c_str());
+    ESP_LOGE(TAG, "Read rows failed, file not found: %s", full_path.c_str());
     return out;
+  }
+
+  // --- Parse condition like ">5", "<=2.3", "!=0", "=0", "10-20" ---
+  char op[3] = {0};
+  float target = 0.0f, target2 = 0.0f;
+  bool between = false;
+  bool use_condition = (condition != nullptr && strlen(condition) > 0);
+
+  if (use_condition) {
+    if (sscanf(condition, "%f - %f", &target, &target2) == 2 ||
+        sscanf(condition, "%f--%f", &target, &target2) == 2) {
+      between = true;
+    } else if (sscanf(condition, "%2[<>=!]%f", op, &target) < 1) {
+      ESP_LOGW(TAG, "Invalid condition: %s", condition);
+      use_condition = false;
+    }
   }
 
   char buf[256];
@@ -354,28 +410,49 @@ std::vector<std::string> SdSpiCard::csv_read_column_range(
 
   while (fgets(buf, sizeof(buf), f)) {
     if (row >= row_start && row <= row_end) {
-      int col = 0;
+      std::vector<std::string> cols;
       char *token = strtok(buf, ",");
       while (token != nullptr) {
-        if (col == col_index) {
-          out.push_back(std::string(token));
-          break;
-        }
+        cols.emplace_back(token);
         token = strtok(nullptr, ",");
-        col++;
       }
+
+      bool keep = true;
+      if (use_condition && cond_col_index < (int)cols.size()) {
+        float val = atof(cols[cond_col_index].c_str());
+        keep = false;
+        if (between)
+          keep = (val >= target && val <= target2);
+        else if (strcmp(op, ">") == 0)
+          keep = (val > target);
+        else if (strcmp(op, "<") == 0)
+          keep = (val < target);
+        else if (strcmp(op, ">=") == 0)
+          keep = (val >= target);
+        else if (strcmp(op, "<=") == 0)
+          keep = (val <= target);
+        else if (strcmp(op, "=") == 0)
+          keep = (val == target);
+        else if (strcmp(op, "!=") == 0)
+          keep = (val != target);
+      }
+
+       if (keep) out.push_back([&]{ std::vector<std::string> t(cols); t.push_back("@row=" + std::to_string(row)); return t; }());
+
     }
     if (row > row_end) break;
     row++;
   }
 
   fclose(f);
-
-  ESP_LOGI(TAG, "Read column %d, rows %d–%d from %s, got %d values",
-           col_index, row_start, row_end, full_path.c_str(), (int) out.size());
-
+  ESP_LOGI(TAG, "Read rows %d–%d (cond col=%d '%s') → %d rows",
+           row_start, row_end, cond_col_index,
+           use_condition ? condition : "(none)", (int)out.size());
   return out;
 }
+
+
+
 
 // check sd card presence , if failed try to create , if failed mark the card as failed
 bool SdSpiCard::check_kappa() {
@@ -413,7 +490,22 @@ void SdSpiCard::handle_sd_failure(const char *reason) {
   if (this->card_ != nullptr) {
     esp_vfs_fat_sdcard_unmount(MOUNT_POINT, this->card_);
     this->card_ = nullptr;
+    
+    // Invalidate sensor values
+        if (this->total_space_sensor_ != nullptr)
+           this->total_space_sensor_->publish_state(NAN);
+           
+        if (this->used_space_sensor_  != nullptr) 
+           this->used_space_sensor_->publish_state(NAN);
+           
+        if (this->free_space_sensor_  != nullptr) 
+           this->free_space_sensor_->publish_state(NAN);
+           
+       for (auto &fs : file_size_sensors_) {
+        if (fs.sensor != nullptr) fs.sensor->publish_state(NAN);
+    }
   }
+  
 
   // --- Step 2: Update binary sensor ---
 #ifdef USE_BINARY_SENSOR
@@ -480,14 +572,9 @@ void SdSpiCard::try_remount() {
 
 void SdSpiCard::update() {
 #ifdef USE_SENSOR
-  // Update sensors periodically
- // static uint32_t last_update = 0;
- // uint32_t now = millis();
-//  if (now - last_update > 90000) {  // every 10s
-//    last_update = now;
+
     update_sensors();
     
- // }
 #endif
 }
 
