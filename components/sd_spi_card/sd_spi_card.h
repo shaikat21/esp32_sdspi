@@ -72,7 +72,10 @@ class SdSpiCard : public PollingComponent {
   int  csv_row_count(const char *path);
   bool csv_delete_rows(const char *path, int row_start, int row_end);
   bool csv_keep_last_n(const char *path, int max_rows);
-  std::vector<std::string> csv_read_column_range(const char *path, int col_index, int row_start, int row_end);
+  std::vector<std::vector<std::string>> csv_read_rows_range(
+          const char *path, int row_start, int row_end,
+            int cond_col_index = -1, const char *condition = "");
+
   
 
 #ifdef USE_SENSOR
@@ -91,6 +94,7 @@ class SdSpiCard : public PollingComponent {
   void append_file(const char *path, const char *line);
   void write_file(const char *path, const char *line);
   bool delete_file(const char *path);
+  bool csv_replace_col(const char *path, int row_index, int col_index, const char *new_value);
 
  protected:
   sdmmc_card_t *card_{nullptr};
